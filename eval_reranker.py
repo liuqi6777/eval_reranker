@@ -12,7 +12,7 @@ from colbert.infra import ColBERTConfig
 from colbert.modeling.colbert import colbert_score
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from trec_eval import EvalFunction
+from trec_eval import trec_eval
 from pyserini.search import LuceneSearcher, get_topics, get_qrels
 
 
@@ -138,7 +138,11 @@ def run_cross_rerank(retrieval_results, model, tokenizer):
             [(all_queries[i], passage) for passage in all_passages],
             return_tensors='pt', padding=True, truncation=True, max_length=512)
         inputs = {key: value.to('cuda') for key, value in inputs.items()}
-        scores = model(**inputs).logits.flatten().cpu().numpy().tolist()
+        scores = model(**inputs).logits
+        if scores.shape[1] == 1:
+            scores = scores.flatten().cpu().numpy().tolist()
+        else:
+            scores = scores[:, 1].flatten().cpu().numpy().tolist()
         ranking = numpy.argsort(scores)[::-1]
         rerank_results.append({'query': retrieval_results[i]['query'], 'hits': []})
         for j in range(0, len(ranking)):
@@ -221,11 +225,9 @@ def eval_dataset(dataset, retriver, reranker, topk=100):
             return
         
     # Evaluate nDCG@10
-    output_file = tempfile.NamedTemporaryFile(delete=False).name
+    output_file = f'results/eval_{dataset}_{retriver}.txt'
     write_eval_file(retrieval_results, output_file)
-    EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', TOPICS[dataset], output_file])
-    # Rename the output file to a better name
-    shutil.move(output_file, f'results/eval_{dataset}_{retriver}.txt')
+    trec_eval(TOPICS[dataset], output_file)
     
     # Rerank
     rerank_results_file = f'results/{dataset}_rerank_{reranker.split("/")[-1]}_top{topk}.jsonl'
@@ -239,8 +241,12 @@ def eval_dataset(dataset, retriver, reranker, topk=100):
             rerank_results = run_colbert_rerank(retrieval_results, colbert_reranker)
         else:
             tokenizer = AutoTokenizer.from_pretrained(reranker)
-            model = AutoModelForSequenceClassification.from_pretrained(
-                reranker, num_labels=1, trust_remote_code=True)
+            try:
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    reranker, num_labels=1, trust_remote_code=True)
+            except:
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    reranker, num_labels=2, trust_remote_code=True)
             rerank_results = run_cross_rerank(retrieval_results, model, tokenizer)
         write_retrival_results(
             rerank_results, 
@@ -249,11 +255,9 @@ def eval_dataset(dataset, retriver, reranker, topk=100):
         )
 
     # Evaluate nDCG@10
-    output_file = tempfile.NamedTemporaryFile(delete=False).name
+    output_file = f'results/eval_{dataset}_{retriver}_{reranker.split("/")[-1]}.txt'
     write_eval_file(rerank_results, output_file)
-    EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', TOPICS[dataset], output_file])
-    # Rename the output file to a better name
-    shutil.move(output_file, f'results/eval_{dataset}_{retriver}_{reranker.split("/")[-1]}.txt')
+    trec_eval(TOPICS[dataset], output_file)
     
 
 if __name__ == "__main__":
